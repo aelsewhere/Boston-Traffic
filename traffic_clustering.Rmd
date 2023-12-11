@@ -1,0 +1,403 @@
+---
+title: "Clustering Traffic Dataset"
+author: "Claire Dudley"
+date: "2023-12-03"
+output: html_document
+---
+# Libraries
+```{r}
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(dendextend)
+library(lubridate)
+library(dbscan)
+library(clusterCrit)
+library(proxy)
+library(dtwclust)
+library(TSclust)
+library(ggdendro)
+library(grid)
+library(gridExtra)
+
+```
+
+# Dataframe
+```{r}
+final_df <- read_csv('FINAL_BUILD.csv')
+```
+
+# Filtering out NAs
+```{r}
+final_df <-
+  final_df %>%
+  filter(!is.na("12:00 AM"))
+
+final_df <- final_df[complete.cases(final_df[ , 4:ncol(final_df)]), ]
+
+final_df$Date <- as.Date(final_df$Date, "%m/%d/%Y")
+
+```
+
+# Removing repeat rows
+```{r}
+final_df <-
+  final_df %>%
+  unique()
+
+colnames(final_df)[1] = "location"
+
+final_df <- final_df[, -2]
+```
+
+
+# Selecting feature columns
+```{r}
+feature_columns <- final_df[, 5:ncol(final_df), drop = FALSE]
+```
+
+```{r}
+# Example: Impute missing values with mean
+feature_columns <- feature_columns %>% mutate_all(funs(ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+```
+
+# Scaling
+```{r}
+z_score <- scale(feature_columns)
+threshold <- 3
+outliers <- abs(z_score) > threshold
+cleaned <- final_df[!apply(outliers, 1, any), ]
+
+feature_columns <- cleaned[, 5:ncol(cleaned), drop = FALSE]
+scaled_feature_columns <- as.data.frame(scale(feature_columns))
+```
+
+
+# Distance matrix
+```{r}
+distance_matrix <- dist(scaled_feature_columns, method = 'euclidean')
+```
+
+# Hierarchical Clustering
+```{r}
+hierarchical_result <- hclust(distance_matrix, method = "ward.D2")
+fviz_nbclust(scaled_feature_columns, FUN = hcut, method = "silhouette")
+```
+
+```{r}
+# Example: Plot hierarchical clustering dendrogram
+plot(hierarchical_result, hang = -1, cex = 0.6, main = "Hierarchical Clustering Dendrogram")
+rect.hclust(hierarchical_result , k = 2, border = 2:6)
+abline(h = 3, col = 'red')
+
+```
+
+cutting dendrogram
+
+```{r}
+num_clusters <- 2
+cluster_assignment <- cutree(hierarchical_result, k = num_clusters)
+
+table(cluster_assignment, cleaned$location)
+```
+
+
+analyzing cluster membership by location
+```{r}
+cluster_data <- cbind(cleaned, Cluster = factor(cluster_assignment))
+
+cluster_summary <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarize(across(where(is.numeric), sum)) %>%
+  ungroup()
+
+cluster_summary <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+```
+
+analyzing cluster membership by date
+```{r}
+# Month column
+cluster_data$month <- month(mdy(cluster_data$Date))
+
+cluster_summary2 <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarize(across(where(is.numeric), sum)) %>%
+  ungroup()
+
+cluster_summary2 <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarise(count = n()) %>%
+  ungroup()
+```
+
+# Visualizing
+
+Bar plot by location
+```{r}
+# Assuming cluster_data is your data frame with Cluster and location columns
+top_n_locations <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarise(count = n()) %>%
+  arrange(Cluster, desc(count)) %>%
+  group_by(Cluster) %>%
+  top_n(5)  # Adjust the number of top locations to show
+
+# Create bar plot
+ggplot(top_n_locations, aes(x = reorder(location, count), y = count, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top Locations per Cluster", x = "Location", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Bar plot by date
+```{r}
+# Assuming cluster_data is your data frame with Cluster and date columns
+top_n_dates <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarise(count = n()) %>%
+  arrange(Cluster, desc(count)) %>%
+  group_by(Cluster) %>%
+  top_n(5)  # Adjust the number of top dates to show
+
+# Create bar plot
+ggplot(top_n_dates, aes(x = reorder(month, count), y = count, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top Months per Cluster", x = "Month", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Evaluation
+```{r}
+silhouette_score <- silhouette(cluster_assignment, distance_matrix)
+mean(silhouette_score[, 'sil_width'])
+```
+ward: 0.441
+average: 0.456
+complete:0.441
+single: 0.226
+
+
+
+
+# DBScan
+
+```{r}
+eps_values <- seq(0.1, 1.0, by = 0.1)
+MinPts_values <- c(3, 5, 10, 15)
+
+# Grid search
+results <- data.frame()
+
+for (eps in eps_values) {
+  for (MinPts in MinPts_values) {
+    dbscan_result <- dbscan(scaled_feature_columns, eps = eps, MinPts = MinPts)
+    
+    # Check if any clusters were formed
+    if (length(unique(dbscan_result$cluster)) > 1) {
+      # Create a distance matrix
+      dist_matrix <- proxy::dist(as.matrix(scaled_feature_columns))
+      
+      # Calculate the silhouette score
+      silhouette_score <- silhouette(dbscan_result$cluster, dist_matrix)
+      
+      # Access silhouette widths
+      sil_width <- silhouette_score[, "sil_width"]
+      
+      # Calculate the mean silhouette score
+      avg_silhouette <- mean(sil_width)
+      
+      results <- rbind(results, data.frame(eps = eps, MinPts = MinPts, silhouette = avg_silhouette))
+    } else {
+      # Handle the case where no meaningful clusters were formed
+      warning(paste("No meaningful clusters for eps =", eps, "and MinPts =", MinPts))
+    }
+  }
+}
+```
+
+
+```{r}
+eps <- 0.3
+minPts <- 3
+
+dbscan_res <- dbscan(scaled_feature_columns, eps = eps, minPts = minPts)
+
+```
+
+
+
+# Evaluation
+```{r}
+dist_matrix <- proxy::dist(as.matrix(scaled_feature_columns))
+silhouette_score <- silhouette(dbscan_res$cluster, dist_matrix)
+mean(silhouette_score[, "sil_width"])
+```
+0.0913
+
+
+# Comparing DBScan and Hierarchical Clustering
+```{r}
+# Add the cluster labels to the original data frame
+cleaned$dbcluster <- dbscan_res$cluster
+final_df$hierarchical_cluster <- factor(cluster_assignment)
+```
+
+```{r}
+cluster_data <- cbind(cleaned, dbscan_clust = dbscan_res$cluster)
+cluster_data <-
+  cluster_data %>%
+  mutate(Cluster = as.factor(dbscan_clust + 1))
+
+cluster_summary <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarize(across(where(is.numeric), sum)) %>%
+  ungroup()
+
+cluster_summary <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+```
+
+analyzing cluster membership by date
+```{r}
+# Month column
+cluster_data$month <- month(ymd(cluster_data$Date))
+
+cluster_summary2 <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarize(across(where(is.numeric), sum)) %>%
+  ungroup()
+
+cluster_summary2 <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarise(count = n()) %>%
+  ungroup()
+```
+
+Bar plot by location
+```{r}
+# Assuming cluster_data is your data frame with Cluster and location columns
+top_n_locations <- cluster_data %>%
+  group_by(Cluster, location) %>%
+  summarise(count = n()) %>%
+  arrange(Cluster, desc(count)) %>%
+  group_by(Cluster) %>%
+  top_n(5)  # Adjust the number of top locations to show
+
+# Create bar plot
+ggplot(top_n_locations, aes(x = reorder(location, count), y = count, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top Locations per Cluster", x = "Location", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Bar plot by date
+```{r}
+# Assuming cluster_data is your data frame with Cluster and date columns
+top_n_dates <- cluster_data %>%
+  group_by(Cluster, month) %>%
+  summarise(count = n()) %>%
+  arrange(Cluster, desc(count)) %>%
+  group_by(Cluster) %>%
+  top_n(5)  # Adjust the number of top dates to show
+
+# Create bar plot
+ggplot(top_n_dates, aes(x = reorder(month, count), y = count, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top Months per Cluster", x = "Month", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Evaluation
+
+# KMeans
+
+Elbow method
+```{r}
+fviz_nbclust(scaled_feature_columns, FUN = kmeans, method = "silhouette")
+```
+so 2 clusters
+
+```{r}
+kmeans_result <- kmeans(feature_columns, centers = 2)
+```
+
+
+
+```{r}
+fviz_cluster(kmeans_result, data = scaled_feature_columns,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+
+```{r}
+silhouette_score <- silhouette(kmeans_result$cluster, distance_matrix)
+mean(silhouette_score[, 'sil_width'])
+```
+0.4923
+
+
+# Time-Series Clustering in R using dtwclust package
+
+First with columns as locations
+```{r}
+feature_columns2 <- t(final_df[, c(1,5:ncol(final_df)), drop = FALSE])
+colnames(feature_columns2) <- feature_columns2[1,]
+feature_columns2 <- as.data.frame(feature_columns2[-1, ])
+
+feature_columns2 <- sapply(feature_columns2, as.numeric)
+t(feature_columns)
+```
+
+
+```{r}
+dist_ts <- TSclust::diss(SERIES = t(feature_columns), METHOD = "DTWARP")
+```
+
+```{r}
+hc2 <- stats::hclust(dist_ts, method = "ward.D2")
+hclus2 <- stats::cutree(hc2, k = 2) %>% # hclus <- cluster::pam(dist_ts, k = 2)$clustering has a similar result
+  as.data.frame(.) %>%
+  dplyr::rename(.,cluster_group = .)  %>%
+  tibble::rownames_to_column("type_col")
+```
+
+```{r}
+hcdata <- ggdendro::dendro_data(hc2)
+names_order <- hcdata$labels$label
+
+p1 <- hcdata %>%
+  ggdendro::ggdendrogram(., rotate=TRUE, leaf_labels=FALSE)
+gp1<-ggplotGrob(p1)
+
+p2 <- feature_columns %>%
+  dplyr::mutate(index = 1:500) %>%
+  tidyr::gather(key = type_col,value = value, -index) %>%
+  dplyr::full_join(., hclus2, by = "type_col") %>% 
+  mutate(type_col = factor(type_col, levels = rev(as.character(names_order)))) %>% 
+  ggplot(aes(x = index, y = value, colour = cluster_group)) +
+  geom_line() +
+  facet_wrap(~type_col, ncol = 1, strip.position="left") + 
+  guides(color=FALSE) +
+  theme_bw() + 
+  theme(strip.background = element_blank(), strip.text = element_blank())
+
+
+gp2<-ggplotGrob(p2) 
+
+grid.arrange(gp2, gp1, ncol=2, widths=c(4,2))
+```
+
