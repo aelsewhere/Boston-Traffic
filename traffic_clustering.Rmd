@@ -173,6 +173,7 @@ ggplot(top_n_dates, aes(x = reorder(month, count), y = count, fill = Cluster)) +
 ```
 
 # Evaluation
+ran through each linkage method, results were written in below
 ```{r}
 silhouette_score <- silhouette(cluster_assignment, distance_matrix)
 mean(silhouette_score[, 'sil_width'])
@@ -191,31 +192,29 @@ single: 0.226
 eps_values <- seq(0.1, 1.0, by = 0.1)
 MinPts_values <- c(3, 5, 10, 15)
 
-# Grid search
+# Running a grid search to fine tune parameters
 results <- data.frame()
 
 for (eps in eps_values) {
   for (MinPts in MinPts_values) {
     dbscan_result <- dbscan(scaled_feature_columns, eps = eps, MinPts = MinPts)
     
-    # Check if any clusters were formed
+    # if cluster formed
     if (length(unique(dbscan_result$cluster)) > 1) {
-      # Create a distance matrix
+      
       dist_matrix <- proxy::dist(as.matrix(scaled_feature_columns))
       
-      # Calculate the silhouette score
       silhouette_score <- silhouette(dbscan_result$cluster, dist_matrix)
       
-      # Access silhouette widths
+      # Value needed for silhouette score
       sil_width <- silhouette_score[, "sil_width"]
       
-      # Calculate the mean silhouette score
       avg_silhouette <- mean(sil_width)
       
       results <- rbind(results, data.frame(eps = eps, MinPts = MinPts, silhouette = avg_silhouette))
     } else {
-      # Handle the case where no meaningful clusters were formed
-      warning(paste("No meaningful clusters for eps =", eps, "and MinPts =", MinPts))
+      # HAndle
+      warning(paste("No clusters found for eps =", eps, "and MinPts =", MinPts))
     }
   }
 }
@@ -245,7 +244,7 @@ mean(silhouette_score[, "sil_width"])
 ```{r}
 # Add the cluster labels to the original data frame
 cleaned$dbcluster <- dbscan_res$cluster
-final_df$hierarchical_cluster <- factor(cluster_assignment)
+cleaned$hierarchical_cluster <- factor(cluster_assignment)
 ```
 
 ```{r}
@@ -347,57 +346,7 @@ fviz_cluster(kmeans_result, data = scaled_feature_columns,
 silhouette_score <- silhouette(kmeans_result$cluster, distance_matrix)
 mean(silhouette_score[, 'sil_width'])
 ```
-0.4923
+0.441
 
 
-# Time-Series Clustering in R using dtwclust package
-
-First with columns as locations
-```{r}
-feature_columns2 <- t(final_df[, c(1,5:ncol(final_df)), drop = FALSE])
-colnames(feature_columns2) <- feature_columns2[1,]
-feature_columns2 <- as.data.frame(feature_columns2[-1, ])
-
-feature_columns2 <- sapply(feature_columns2, as.numeric)
-t(feature_columns)
-```
-
-
-```{r}
-dist_ts <- TSclust::diss(SERIES = t(feature_columns), METHOD = "DTWARP")
-```
-
-```{r}
-hc2 <- stats::hclust(dist_ts, method = "ward.D2")
-hclus2 <- stats::cutree(hc2, k = 2) %>% # hclus <- cluster::pam(dist_ts, k = 2)$clustering has a similar result
-  as.data.frame(.) %>%
-  dplyr::rename(.,cluster_group = .)  %>%
-  tibble::rownames_to_column("type_col")
-```
-
-```{r}
-hcdata <- ggdendro::dendro_data(hc2)
-names_order <- hcdata$labels$label
-
-p1 <- hcdata %>%
-  ggdendro::ggdendrogram(., rotate=TRUE, leaf_labels=FALSE)
-gp1<-ggplotGrob(p1)
-
-p2 <- feature_columns %>%
-  dplyr::mutate(index = 1:500) %>%
-  tidyr::gather(key = type_col,value = value, -index) %>%
-  dplyr::full_join(., hclus2, by = "type_col") %>% 
-  mutate(type_col = factor(type_col, levels = rev(as.character(names_order)))) %>% 
-  ggplot(aes(x = index, y = value, colour = cluster_group)) +
-  geom_line() +
-  facet_wrap(~type_col, ncol = 1, strip.position="left") + 
-  guides(color=FALSE) +
-  theme_bw() + 
-  theme(strip.background = element_blank(), strip.text = element_blank())
-
-
-gp2<-ggplotGrob(p2) 
-
-grid.arrange(gp2, gp1, ncol=2, widths=c(4,2))
-```
 
